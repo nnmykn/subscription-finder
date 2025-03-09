@@ -4,7 +4,8 @@ import {
   middleware,
   validateSignature,
 } from '@line/bot-sdk'
-import axios from 'axios'
+import axios, { type AxiosError } from 'axios'
+import axiosRetry from 'axios-retry'
 import CryptoJS from 'crypto-js'
 import { type NextRequest, NextResponse } from 'next/server'
 
@@ -13,6 +14,21 @@ const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN || '',
   channelSecret: process.env.LINE_CHANNEL_SECRET || '',
 }
+
+// axiosに再試行機能を追加
+axiosRetry(axios, {
+  retries: 3, // 最大3回まで再試行
+  retryDelay: (retryCount) => {
+    return retryCount * 1000 // 指数バックオフ（1秒、2秒、3秒...）
+  },
+  retryCondition: (error: AxiosError): boolean => {
+    // タイムアウトエラーと5xxエラーの場合のみ再試行
+    return (
+      axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+      !!(error.response && error.response.status >= 500)
+    )
+  },
+})
 
 // 暗号化キー
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || config.channelSecret
@@ -31,20 +47,52 @@ function decrypt(ciphertext: string): string {
   return bytes.toString(CryptoJS.enc.Utf8)
 }
 
+// サブスクリプション情報の型定義
+interface Subscription {
+  name: string
+  price: number | string
+  paymentDate: string
+  [key: string]: any // その他のプロパティがある場合
+}
+
 // サブスクリプション情報を取得するヘルパー関数
-async function getSubscriptions(email: string, password: string) {
+async function getSubscriptions(
+  email: string,
+  password: string,
+): Promise<Subscription[]> {
   try {
+    // URLをcloudflareではなくローカルに変更
+    // タイムアウト設定を30秒に設定
     const response = await axios.post(
-      `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/finder`,
+      '/api/finder',
       {
         email,
         password,
+      },
+      {
+        baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000',
+        timeout: 30000, // 30秒のタイムアウト
+        headers: {
+          'Content-Type': 'application/json',
+        },
       },
     )
 
     return response.data.results
   } catch (error) {
     console.error('サブスクリプション検索中にエラーが発生しました:', error)
+
+    // エラータイプを判定して適切なメッセージを返す
+    if (axios.isAxiosError(error) && error.code === 'ECONNABORTED') {
+      throw new Error(
+        'リクエストがタイムアウトしました。後ほど再試行してください。',
+      )
+    }
+    if (axios.isAxiosError(error) && error.response) {
+      throw new Error(
+        `サーバーエラー: ${error.response.status} - ${error.response.statusText}`,
+      )
+    }
     throw error
   }
 }
@@ -80,71 +128,46 @@ async function handleTextMessage(event: WebhookEvent) {
     const email = parts[1]
     const password = parts[2]
 
+    // 処理開始のメッセージを即時応答
+    await client.replyMessage(replyToken, {
+      type: 'text',
+      text: 'サブスクリプションを検索しています。しばらくお待ちください...',
+    })
+
     try {
-      // ユーザーIDと認証情報の組み合わせを暗号化してトークンを作成
-      // 実際のアプリケーションでは、このトークンをデータベースに保存し、
-      // ユーザーが再度認証せずに利用できるようにすることも検討できます
-      const encryptedToken = encrypt(
-        JSON.stringify({
-          userId,
-          email,
-          password,
-          timestamp: new Date().toISOString(),
-        }),
-      )
-      console.log(`暗号化トークンを生成しました: ${userId}`)
-
-      // 実行中メッセージを送信
-      await client.replyMessage(replyToken, {
-        type: 'text',
-        text: 'サブスクリプションを検索しています。しばらくお待ちください...',
-      })
-
-      // サブスクリプション情報を取得
+      // 非同期でサブスク検索を実行
       const subscriptions = await getSubscriptions(email, password)
 
-      if (!subscriptions || subscriptions.length === 0) {
-        await client.pushMessage(userId, {
-          type: 'text',
-          text: 'サブスクリプションが見つかりませんでした。',
-        })
-        return
-      }
-
-      // 結果の整形
-      let resultMessage = '以下のサブスクリプションが見つかりました:\n\n'
-
-      // 上位10件のみ表示
-      const topResults = subscriptions.slice(0, 10)
-
-      topResults.forEach((sub: any, index: number) => {
-        resultMessage += `${index + 1}. ${sub.取引内容}\n`
-        resultMessage += `   金額: ${sub.取引金額}円\n`
-        resultMessage += `   確率: ${Math.round(sub.サブスク確率 * 100)}%\n`
-        resultMessage += `   理由: ${sub.理由}\n\n`
-      })
-
-      // 合計金額の計算
-      const totalAmount = topResults.reduce((sum: number, sub: any) => {
-        const amount = Number.parseInt(sub.取引金額.replace(/,/g, ''), 10) || 0
-        return sum + amount
-      }, 0)
-
-      resultMessage += `月間サブスク推定総額: ${totalAmount.toLocaleString()}円`
-
-      // 結果を送信
+      // 結果をpushMessageで送信
       await client.pushMessage(userId, {
         type: 'text',
-        text: resultMessage,
+        text: `${subscriptions.length}件のサブスクリプションが見つかりました:\n\n${subscriptions.map((s: Subscription) => `・${s.name}: ${s.price}円 (${s.paymentDate})`).join('\n')}`,
       })
     } catch (error) {
       console.error('サブスクリプション検索中にエラーが発生しました:', error)
+
+      let errorMessage = 'サブスクリプション検索中にエラーが発生しました。'
+
+      // エラータイプに応じたメッセージ
+      if (axios.isAxiosError(error) && error.code === 'ECONNABORTED') {
+        errorMessage +=
+          'リクエストがタイムアウトしました。後ほど再試行してください。'
+      } else if (axios.isAxiosError(error) && error.response) {
+        errorMessage += `サーバーエラー: ${error.response.status} - ${error.response.statusText}`
+      } else if (error instanceof Error) {
+        errorMessage += error.message
+      }
+
+      // エラーメッセージをpushMessageで送信
       await client.pushMessage(userId, {
         type: 'text',
-        text: 'エラーが発生しました。もう一度お試しください。',
+        text: errorMessage,
       })
     }
-  } else if (messageText === 'ヘルプ') {
+
+    return
+  }
+  if (messageText === 'ヘルプ') {
     // ヘルプメッセージ
     await client.replyMessage(replyToken, {
       type: 'text',
