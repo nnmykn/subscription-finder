@@ -235,7 +235,10 @@ export async function POST(request: NextRequest) {
           }
 
           // 金額による判定（よく見られるサブスクの金額）
-          const amount = Number.parseInt((data.金額 || '').replace(/[^0-9]/g, ''), 10)
+          const amount = Number.parseInt(
+            (data.金額 || '').replace(/[^0-9]/g, ''),
+            10,
+          )
           if (!Number.isNaN(amount)) {
             const closestAmount = commonAmounts.find(
               (a) => Math.abs(a - amount) <= 100,

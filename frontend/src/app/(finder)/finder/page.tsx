@@ -19,9 +19,12 @@ import {
   FormMessage,
 } from '@/client/components/ui/form'
 import { Input } from '@/client/components/ui/input'
+import { Progress } from '@/client/components/ui/progress'
 import { Separator } from '@/client/components/ui/separator'
-import { useState } from 'react'
+import { Skeleton } from '@/client/components/ui/skeleton'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
+import { toast } from 'sonner'
 
 type FormData = {
   email: string
@@ -38,6 +41,8 @@ type SubscriptionResult = {
 export default function Finder() {
   const [step, setStep] = useState<'auth' | 'analyzing' | 'results'>('auth')
   const [results, setResults] = useState<SubscriptionResult[]>([])
+  const [progress, setProgress] = useState(0)
+  const [processingStage, setProcessingStage] = useState('')
 
   const form = useForm<FormData>({
     defaultValues: {
@@ -46,19 +51,90 @@ export default function Finder() {
     },
   })
 
-  const onSubmit = (data: FormData) => {
+  // 解析中の進捗アニメーション
+  useEffect(() => {
+    if (step === 'analyzing') {
+      // 20分 = 1200秒で95%まで到達するように設定
+      // 1200秒 / 95% = 約12.6秒で1%進む
+      const incrementInterval = 1000 // 1秒ごとに更新
+      const incrementValue = 0.08 // 1秒あたり0.08%増加（≒20分で95%）
+
+      const timer = setInterval(() => {
+        setProgress((prev) => {
+          const newProgress = prev + incrementValue
+
+          // 進捗に応じて処理段階を更新
+          if (newProgress <= 10) {
+            setProcessingStage('Money Forwardにログイン中...')
+          } else if (newProgress <= 30) {
+            setProcessingStage('取引データを取得中...')
+          } else if (newProgress <= 50) {
+            setProcessingStage('サブスクリプションデータを抽出中...')
+          } else if (newProgress <= 70) {
+            setProcessingStage('データを解析中...')
+          } else if (newProgress <= 90) {
+            setProcessingStage('サブスクリプションを特定中...')
+          } else {
+            setProcessingStage('結果を準備中...')
+          }
+
+          if (newProgress >= 95) {
+            clearInterval(timer)
+            return 95
+          }
+          return newProgress
+        })
+      }, incrementInterval)
+
+      return () => {
+        clearInterval(timer)
+        setProgress(0)
+        setProcessingStage('')
+      }
+    }
+  }, [step])
+
+  const onSubmit = async (data: FormData) => {
     setStep('analyzing')
+    setProgress(0)
+    setProcessingStage('開始しています...')
+    toast(
+      'サブスクリプションの分析を開始しました。完了までしばらくお待ちください。',
+    )
 
-    setTimeout(() => {
-      const dummyResults: SubscriptionResult[] = [
-        { id: '1', name: 'Netflix', price: 1490, billingCycle: '月額' },
-        { id: '2', name: 'Amazon Prime', price: 500, billingCycle: '月額' },
-        { id: '3', name: 'Spotify', price: 980, billingCycle: '月額' },
-      ]
+    try {
+      const response = await fetch('/api/finder', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data),
+      })
 
-      setResults(dummyResults)
-      setStep('results')
-    }, 3000)
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || '分析中にエラーが発生しました')
+      }
+
+      // 進捗を100%に設定
+      setProgress(100)
+      setProcessingStage('完了しました！')
+
+      const subscriptions = await response.json()
+      setResults(subscriptions)
+
+      // 少し待ってから結果画面に遷移
+      setTimeout(() => {
+        setStep('results')
+        toast.success('サブスクリプションの分析が完了しました！')
+      }, 500)
+    } catch (error) {
+      console.error('分析中にエラーが発生しました:', error)
+      toast.error(
+        `エラーが発生しました: ${error instanceof Error ? error.message : '不明なエラー'}`,
+      )
+      setStep('auth')
+    }
   }
 
   return (
@@ -128,8 +204,35 @@ export default function Finder() {
               サブスクリプションを検索しています。しばらくお待ちください。
             </CardDescription>
           </CardHeader>
-          <CardContent className="flex justify-center py-10">
-            <div className="animate-spin rounded-full h-16 w-16 border-t-2 border-b-2 border-primary" />
+          <CardContent className="space-y-6 py-10">
+            <div className="space-y-2">
+              <div className="flex justify-between text-sm">
+                <span>{Math.round(progress)}%</span>
+                <span>約20分かかります</span>
+              </div>
+              <Progress value={progress} className="h-2 w-full" />
+              <p className="text-sm font-medium mt-2">{processingStage}</p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* サブスクリプションカードのスケルトン */}
+              {Array.from({ length: 3 }).map((_, index) => (
+                <div key={index} className="space-y-3">
+                  <Skeleton className="h-8 w-3/4" />
+                  <Skeleton className="h-6 w-1/2" />
+                  <Skeleton className="h-20 w-full" />
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-8 space-y-3">
+              <p className="text-sm text-muted-foreground">処理状況:</p>
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-full" />
+                <Skeleton className="h-4 w-4/5" />
+                <Skeleton className="h-4 w-2/3" />
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}
