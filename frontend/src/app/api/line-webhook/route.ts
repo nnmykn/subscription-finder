@@ -8,6 +8,10 @@ import axios, { type AxiosError } from 'axios'
 import axiosRetry from 'axios-retry'
 import CryptoJS from 'crypto-js'
 import { type NextRequest, NextResponse } from 'next/server'
+import { Readable } from 'node:stream'
+
+// APIルートの最大処理時間を設定
+export const maxDuration = 3600; // 60分のタイムアウト
 
 // LINE Bot設定
 const config = {
@@ -17,17 +21,22 @@ const config = {
 
 // axiosに再試行機能を追加
 axiosRetry(axios, {
-  retries: 3, // 最大3回まで再試行
+  retries: 3, // 再試行回数を増やす
   retryDelay: (retryCount) => {
-    return retryCount * 1000 // 指数バックオフ（1秒、2秒、3秒...）
+    // 指数バックオフを使用（再試行ごとに待機時間を増加）
+    return retryCount * 60000 // 1分、2分、3分の間隔で再試行
   },
   retryCondition: (error: AxiosError): boolean => {
-    // タイムアウトエラーと5xxエラーの場合のみ再試行
+    // ネットワークエラーのみ再試行
+    // タイムアウトは再試行しない（長時間実行の場合はタイムアウトしても処理が続いている可能性）
     return (
-      axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+      (axiosRetry.isNetworkOrIdempotentRequestError(error) && error.code !== 'ECONNABORTED') ||
       !!(error.response && error.response.status >= 500)
     )
   },
+  onRetry: (retryCount, error) => {
+    console.log(`リクエスト再試行中 (${retryCount}回目):`, error.message)
+  }
 })
 
 // 暗号化キー
@@ -49,9 +58,12 @@ function decrypt(ciphertext: string): string {
 
 // サブスクリプション情報の型定義
 interface Subscription {
-  name: string
-  price: number | string
-  paymentDate: string
+  取引内容: string
+  取引金額: string
+  取引日: string
+  キーワード: string[]
+  サブスク確率: number
+  理由: string
   [key: string]: any // その他のプロパティがある場合
 }
 
@@ -62,7 +74,7 @@ async function getSubscriptions(
 ): Promise<Subscription[]> {
   try {
     // URLをcloudflareではなくローカルに変更
-    // タイムアウト設定を30秒に設定
+    // タイムアウト設定を増加
     const response = await axios.post(
       '/api/finder',
       {
@@ -71,7 +83,7 @@ async function getSubscriptions(
       },
       {
         baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000',
-        timeout: 30000, // 30秒のタイムアウト
+        timeout: 3000000, // 50分（3000秒）に設定
         headers: {
           'Content-Type': 'application/json',
         },
@@ -85,7 +97,7 @@ async function getSubscriptions(
     // エラータイプを判定して適切なメッセージを返す
     if (axios.isAxiosError(error) && error.code === 'ECONNABORTED') {
       throw new Error(
-        'リクエストがタイムアウトしました。後ほど再試行してください。',
+        'リクエストがタイムアウトしました。データ量が多い場合は、期間を短くして再試行してください。',
       )
     }
     if (axios.isAxiosError(error) && error.response) {
@@ -131,27 +143,45 @@ async function handleTextMessage(event: WebhookEvent) {
     // 処理開始のメッセージを即時応答
     await client.replyMessage(replyToken, {
       type: 'text',
-      text: 'サブスクリプションを検索しています。しばらくお待ちください...',
+      text: 'サブスクリプションを検索しています。処理には最大で30分程度かかる場合があります。しばらくお待ちください...',
     })
 
     try {
       // 非同期でサブスク検索を実行
       const subscriptions = await getSubscriptions(email, password)
 
+      // 結果が空の場合の処理
+      if (!subscriptions || subscriptions.length === 0) {
+        await client.pushMessage(userId, {
+          type: 'text',
+          text: 'サブスクリプションが見つかりませんでした。取引データが存在しないか、サブスクリプションとして認識できる取引がありませんでした。',
+        })
+        return
+      }
+
       // 結果をpushMessageで送信
       await client.pushMessage(userId, {
         type: 'text',
-        text: `${subscriptions.length}件のサブスクリプションが見つかりました:\n\n${subscriptions.map((s: Subscription) => `・${s.name}: ${s.price}円 (${s.paymentDate})`).join('\n')}`,
+        text: `${subscriptions.length}件のサブスクリプションが見つかりました:\n\n${subscriptions.map((s: Subscription) => {
+          // APIのレスポース形式に合わせてマッピング
+          const name = s.取引内容 || '不明なサービス'
+          const price = s.取引金額 || '金額不明'
+          const paymentDate = s.取引日 || '日付不明'
+          const probability = s.サブスク確率 ? `${Math.round(s.サブスク確率 * 100)}%` : '不明'
+          return `・${name}: ${price}円 (${paymentDate}) [確率: ${probability}]`
+        }).join('\n')}`,
       })
     } catch (error) {
       console.error('サブスクリプション検索中にエラーが発生しました:', error)
 
-      let errorMessage = 'サブスクリプション検索中にエラーが発生しました。'
+      let errorMessage = 'サブスクリプション検索中にエラーが発生しました。\n'
 
       // エラータイプに応じたメッセージ
       if (axios.isAxiosError(error) && error.code === 'ECONNABORTED') {
         errorMessage +=
-          'リクエストがタイムアウトしました。後ほど再試行してください。'
+          'リクエストがタイムアウトしました。データ量が多い場合は、期間を短くして再試行してください。'
+      } else if (axios.isAxiosError(error) && error.response && error.response.status === 401) {
+        errorMessage += 'ログイン情報が正しくありません。メールアドレスとパスワードを確認してください。'
       } else if (axios.isAxiosError(error) && error.response) {
         errorMessage += `サーバーエラー: ${error.response.status} - ${error.response.statusText}`
       } else if (error instanceof Error) {
