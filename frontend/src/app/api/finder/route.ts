@@ -230,7 +230,7 @@ export async function POST(request: NextRequest) {
             if (content.includes(pattern.toLowerCase())) {
               initialScore = Math.max(initialScore, score)
               reason = `「${pattern}」を含む取引内容`
-              console.log({reason})
+              console.log({ reason })
               break
             }
           }
@@ -247,7 +247,7 @@ export async function POST(request: NextRequest) {
             if (closestAmount && initialScore < 0.5) {
               initialScore = Math.max(initialScore, 0.5)
               reason = reason || `よく見られるサブスク金額（${amount}円）に近い`
-              console.log({reason})
+              console.log({ reason })
             }
           }
 
@@ -260,7 +260,7 @@ export async function POST(request: NextRequest) {
         const batches = []
 
         for (let i = 0; i < preprocessedData.length; i += batchSize) {
-          console.log({preprocessedData})
+          console.log({ preprocessedData })
           batches.push(preprocessedData.slice(i, i + batchSize))
         }
 

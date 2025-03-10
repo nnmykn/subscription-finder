@@ -91,7 +91,7 @@ async function getSubscriptions(
 ): Promise<Subscription[]> {
   try {
     // URLをcloudflareではなくローカルに変更
-    // タイムアウト設定を増加
+    // タイムアウト設定を短縮
     const response = await axios.post(
       '/api/finder',
       {
@@ -100,7 +100,7 @@ async function getSubscriptions(
       },
       {
         baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000',
-        timeout: 3000000, // 50分（3000秒）に設定
+        timeout: 3000000, // 1分に設定
         headers: {
           'Content-Type': 'application/json',
         },
@@ -122,7 +122,9 @@ async function getSubscriptions(
         `サーバーエラー: ${error.response.status} - ${error.response.statusText}`,
       )
     }
-    throw error
+    throw new Error(
+      'サブスクリプションの検索中にエラーが発生しました。しばらく経ってから再試行してください。',
+    )
   }
 }
 
@@ -459,9 +461,23 @@ async function handleTextMessage(event: WebhookEvent) {
       }
     } catch (error) {
       console.error('データ分析中にエラーが発生しました:', error)
+
+      // エラーメッセージの選択
+      let errorMessage =
+        'データの分析中にエラーが発生しました。もう一度お試しください。'
+
+      if (error instanceof Error) {
+        if (error.message.includes('タイムアウト')) {
+          errorMessage =
+            'データの処理に時間がかかりすぎています。取引データの量を減らして再度お試しください。'
+        } else if (error.message.includes('サーバーエラー')) {
+          errorMessage = error.message
+        }
+      }
+
       await client.pushMessage(userId, {
         type: 'text',
-        text: 'データの分析中にエラーが発生しました。もう一度お試しください。',
+        text: errorMessage,
       })
     }
     return
