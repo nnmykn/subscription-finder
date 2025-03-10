@@ -134,8 +134,8 @@ export async function POST(request: NextRequest) {
       })
 
       const openai = new OpenAI({
-        baseURL: 'http://localhost:11434/v1',
-        apiKey: 'ollama',
+        baseURL: 'https://api.deepseek.com/v1',
+        apiKey: 'sk-112712b0713746abbd86a7582a4ea616',
       })
 
       // 段階的な分析を行う
@@ -230,6 +230,7 @@ export async function POST(request: NextRequest) {
             if (content.includes(pattern.toLowerCase())) {
               initialScore = Math.max(initialScore, score)
               reason = `「${pattern}」を含む取引内容`
+              console.log({reason})
               break
             }
           }
@@ -246,6 +247,7 @@ export async function POST(request: NextRequest) {
             if (closestAmount && initialScore < 0.5) {
               initialScore = Math.max(initialScore, 0.5)
               reason = reason || `よく見られるサブスク金額（${amount}円）に近い`
+              console.log({reason})
             }
           }
 
@@ -258,6 +260,7 @@ export async function POST(request: NextRequest) {
         const batches = []
 
         for (let i = 0; i < preprocessedData.length; i += batchSize) {
+          console.log({preprocessedData})
           batches.push(preprocessedData.slice(i, i + batchSize))
         }
 
@@ -297,8 +300,9 @@ ${batch
  JSONデータのみを返してください。
  `
 
+          console.log('AIにリクエストを送ります。💨', batch)
           const completion = await openai.chat.completions.create({
-            model: 'llama3.3:latest',
+            model: 'deepseek-chat',
             messages: [
               {
                 role: 'system',
@@ -309,6 +313,8 @@ ${batch
               { role: 'user', content: JSON.stringify(batch) },
             ],
           })
+
+          console.log('💰completion', JSON.stringify(completion, null, 2))
 
           try {
             const content = completion.choices[0].message.content || ''
