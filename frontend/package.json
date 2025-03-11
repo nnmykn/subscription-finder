@@ -87,6 +87,7 @@
     "nookies": "^2.5.2",
     "openai": "^4.86.2",
     "openapi-fetch": "^0.11.3",
+    "papaparse": "^5.5.2",
     "playwright": "^1.51.0",
     "postcss": "8.4.29",
     "prettier": "^3.3.3",
